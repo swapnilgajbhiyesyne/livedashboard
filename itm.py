@@ -1,3 +1,5 @@
+import math
+import os
 import dash
 from dash import dcc, html, dash_table
 from dash.dependencies import Output, Input, State
@@ -5,10 +7,12 @@ import plotly.graph_objs as go
 import pandas as pd
 import random
 import datetime
-import os
+from flask import Flask, send_file, render_template_string
+from scipy.stats import norm
 
-# Initialize the Dash app
-app = dash.Dash(__name__)
+# Initialize Flask and Dash apps
+server = Flask(__name__)
+app = dash.Dash(__name__, server=server)
 
 # Initial prices for different strikes
 strikes = [23000, 24000, 25000, 26000, 27000]
@@ -49,7 +53,58 @@ def generate_option_chain_data():
 def generate_india_vix():
     return round(random.uniform(12.0, 18.0), 2)
 
-# App layout
+# Function to calculate ITM probability
+def calculate_itm_probability(S, K, T, r, sigma, option_type='call'):
+    if T == 0:
+        if option_type == 'call':
+            return 100 if S >= K else 0
+        elif option_type == 'put':
+            return 100 if S <= K else 0
+        else:
+            raise ValueError("Invalid option type. Use 'call' or 'put'.")
+    d2 = (math.log(S / K) + (r - 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    if option_type == 'call':
+        return norm.cdf(d2) * 100
+    elif option_type == 'put':
+        return (1 - norm.cdf(d2)) * 100
+
+# Function to generate ITM probability data
+def generate_itm_data():
+    S = 23100
+    r = 0.03
+    sigma = 0.2
+    strike_prices = range(22000, 24001, 500)
+    days_in_month = 30
+
+    data = []
+    for K in strike_prices:
+        for day in range(days_in_month + 1):
+            T = (days_in_month - day) / 365
+            call_prob = calculate_itm_probability(S, K, T, r, sigma, 'call')
+            put_prob = calculate_itm_probability(S, K, T, r, sigma, 'put')
+            data.append({'Strike Price': K, 'Day': day, 'Call ITM %': round(call_prob, 2), 'Put ITM %': round(put_prob, 2)})
+
+    return pd.DataFrame(data)
+
+# Flask route to display ITM probability table
+@server.route("/itm-probability")
+def display_table():
+    data = generate_itm_data()
+    table_html = data.to_html(index=False)
+    html_content = f"""
+    <html>
+        <head><title>ITM Probability Table</title></head>
+        <body>
+            <h2 style='text-align: center;'>ITM Probability vs. Days to Expiration</h2>
+            <div style='width: 80%; margin: auto;'>
+                {table_html}
+            </div>
+        </body>
+    </html>
+    """
+    return render_template_string(html_content)
+
+# Dash App Layout
 app.layout = html.Div([
     html.Div([
         html.H2("Market Dashboard", style={'color': 'white', 'margin': '0', 'padding': '10px'}),
@@ -58,7 +113,7 @@ app.layout = html.Div([
                 html.Li(html.A("Straddle Chart", href="#", id='menu-straddle', n_clicks=0, style={'color': 'white', 'textDecoration': 'none'})),
                 html.Li(html.A("Stock Table", href="#", id='menu-stock', n_clicks=0, style={'color': 'white', 'textDecoration': 'none'})),
                 html.Li(html.A("Option Chain", href="#", id='menu-option-chain', n_clicks=0, style={'color': 'white', 'textDecoration': 'none'})),
-                html.Li(html.A("MoneyControl", href="#", id='menu-itm-prob', n_clicks=0, style={'color': 'white', 'textDecoration': 'none'}))
+                html.Li(html.A("ITM Prob", href="/itm-probability", style={'color': 'white', 'textDecoration': 'none'}, target="_blank"))
             ], style={'listStyle': 'none', 'display': 'flex', 'gap': '20px', 'margin': '0'})
         ], style={'padding': '10px'})
     ], style={'backgroundColor': '#333', 'color': 'white', 'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}),
@@ -145,14 +200,7 @@ app.layout = html.Div([
                     }
                 ]
             )
-        ], id='option-chain-section', style={'display': 'none', 'padding': '10px'}),
-
-        html.Div([
-            html.Iframe(
-                src='https://www.moneycontrol.com/earnings-calendar',
-                style={'width': '100%', 'height': '80vh', 'border': 'none'}
-            )
-        ], id='itm-prob-section', style={'display': 'none', 'padding': '10px'})
+        ], id='option-chain-section', style={'display': 'none', 'padding': '10px'})
     ]),
 
     html.Div(id='india-vix-value', style={'textAlign': 'center', 'color': 'blue', 'fontSize': 24, 'marginTop': '20px'}),
@@ -172,101 +220,7 @@ app.layout = html.Div([
 def update_india_vix(n_intervals):
     return f"India VIX: {generate_india_vix()}"
 
-# Callback to toggle between sections
-@app.callback(
-    [Output('straddle-section', 'style'),
-     Output('stock-section', 'style'),
-     Output('option-chain-section', 'style'),
-     Output('itm-prob-section', 'style')],
-    [Input('menu-straddle', 'n_clicks'),
-     Input('menu-stock', 'n_clicks'),
-     Input('menu-option-chain', 'n_clicks'),
-     Input('menu-itm-prob', 'n_clicks')],
-    [State('straddle-section', 'style'),
-     State('stock-section', 'style'),
-     State('option-chain-section', 'style'),
-     State('itm-prob-section', 'style')]
-)
-def toggle_sections(n_straddle, n_stock, n_option_chain, n_itm_prob, straddle_style, stock_style, option_chain_style, itm_prob_style):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return straddle_style, stock_style, option_chain_style, itm_prob_style
-    else:
-        clicked_id = ctx.triggered[0]['prop_id'].split('.')[0]
-        if clicked_id == 'menu-straddle':
-            return {'display': 'block', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}
-        elif clicked_id == 'menu-stock':
-            return {'display': 'none', 'padding': '10px'}, {'display': 'block', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}
-        elif clicked_id == 'menu-option-chain':
-            return {'display': 'none', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}, {'display': 'block', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}
-        elif clicked_id == 'menu-itm-prob':
-            return {'display': 'none', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}, {'display': 'none', 'padding': '10px'}, {'display': 'block', 'padding': '10px'}
-    return straddle_style, stock_style, option_chain_style, itm_prob_style
-
-# Function to simulate price updates and store straddle prices
-def update_prices_and_straddle(strike):
-    call_price = prices[strike]['call'] + random.uniform(-2, 2)
-    put_price = prices[strike]['put'] + random.uniform(-2, 2)
-    call_price = max(call_price, 0)
-    put_price = max(put_price, 0)
-
-    straddle_price = call_price + put_price
-    prices[strike]['call'] = call_price
-    prices[strike]['put'] = put_price
-    prices[strike]['straddle'].append(straddle_price)
-
-    if len(prices[strike]['straddle']) > 60:
-        prices[strike]['straddle'] = prices[strike]['straddle'][-60:]
-
-    return straddle_price
-
-# Callback to update the graph and check for alerts
-@app.callback(
-    [Output('live-straddle-chart', 'figure'),
-     Output('alert-message', 'children'),
-     Output('live-stock-table', 'data'),
-     Output('option-chain-table', 'data')],
-    [Input('interval-component', 'n_intervals'),
-     Input('strike-price-dropdown', 'value')]
-)
-def update_dashboard(n, selected_strike):
-    global time_series
-
-    # Update prices and straddle for selected strike
-    straddle_price = update_prices_and_straddle(selected_strike)
-
-    # Update time series
-    time_series.append(datetime.datetime.now())
-    if len(time_series) > 60:
-        time_series = time_series[-60:]
-
-    # Generate alert message
-    alert_message = ""
-    if straddle_price >= 500:
-        alert_message = f"Alert: Straddle price for {selected_strike} has reached or exceeded 500!"
-    elif straddle_price <= 300:
-        alert_message = f"Alert: Straddle price for {selected_strike} has dropped to or below 300!"
-
-    # Prepare line chart data for plotting
-    straddle_data = prices[selected_strike]['straddle']
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=time_series[-len(straddle_data):],
-        y=straddle_data,
-        mode='lines+markers',
-        name=f'Straddle Price {selected_strike}'
-    ))
-    fig.update_layout(title=f'Live Straddle Price ({selected_strike} Strike)', xaxis_title='Time', yaxis_title='Price', showlegend=True)
-
-    # Update stock table data
-    stock_data = generate_stock_data()
-
-    # Update option chain data
-    option_chain_data = generate_option_chain_data()
-
-    return fig, alert_message, stock_data.to_dict('records'), option_chain_data.to_dict('records')
-
 # Run the app
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Use PORT from environment variable
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 5000))
+    app.run_server(host="0.0.0.0", port=port, debug=True)
